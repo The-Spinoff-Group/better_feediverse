@@ -9,15 +9,17 @@ import dateutil
 import feedparser
 import random
 import time
+import pytz
 
 from bs4 import BeautifulSoup
 from mastodon import Mastodon
-from datetime import datetime, timezone, MINYEAR
-
-DEFAULT_CONFIG_FILE = os.path.join("~", ".better_feediverse")
+from datetime import datetime, timezone, MINYEAR, timedelta
 
 
-def main():
+DEFAULT_CONFIG_FILE = os.path.join(".", ".better_feediverse")
+
+
+def scrape(arg1, arg2):
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-n",
@@ -44,6 +46,8 @@ def main():
     args = parser.parse_args()
     config_file = args.config
 
+    args.verbose = True
+
     if args.verbose:
         print("using config file", config_file)
 
@@ -62,6 +66,12 @@ def main():
 
     newest_post = config["updated"]
 
+    me = masto.me()
+    statuses = masto.account_statuses(me.id, limit=1)
+    latest_post_date = statuses[0].created_at
+    if args.verbose:
+        print("most recent mastodon post date: ", latest_post_date)
+
     for feed in config["feeds"]:
 
         try:
@@ -74,9 +84,9 @@ def main():
                 print(f"HTTP headers: {config['custom_http_headers']}")
 
         if args.verbose:
-            print(f"fetching {feed['url']} entries since {config['updated']}")
+            print(f"fetching {feed['url']} entries since {latest_post_date}")
 
-        for entry in get_feed(feed["url"], config["updated"], http_headers):
+        for entry in get_feed(feed["url"], latest_post_date, http_headers):
             newest_post = max(newest_post, entry["updated"])
 
             try:
@@ -90,12 +100,11 @@ def main():
                 if any(x in entry["title"] for x in ignoretitle):
                     continue
 
-            if args.verbose:
-                print(entry)
             if args.dry_run:
-                print("trial run, not tooting ", entry["title"][:50])
+                print("trial run, not tooting:\n", feed["template"].format(**entry))
+                print("Posted ", entry["title"])
             if not args.dry_run:
-                postbody = feed["template"].format(**entry)
+                postbody = feed["template"].format(entry)
                 if len(postbody) > 499:
                     postfix = "…\n\n(more…)"
                     postbody = postbody[: (499 - len(postfix))] + postfix
@@ -105,16 +114,16 @@ def main():
                 print("Delaying..." + str(delay) + " seconds...")
                 time.sleep(delay)
 
-    if not args.dry_run:
-        config["updated"] = newest_post.isoformat()
-        save_config(config, config_file)
-
+def local_to_utc(utc_dt):
+    return utc_dt.replace(tzinfo=timezone.tzname()).astimezone(tz=None)
 
 def get_feed(feed_url, last_update, http_headers):
     feed = feedparser.parse(feed_url, http_headers)
+    pacific_now = datetime.now(pytz.timezone("Pacific/Auckland"))
+    offset = pacific_now.utcoffset().total_seconds()
     if last_update:
         entries = [
-            e for e in feed.entries if dateutil.parser.parse(e["updated"]) > last_update
+            e for e in feed.entries if (dateutil.parser.parse(e["updated"]) - timedelta(seconds=offset)) > last_update
         ]
     else:
         entries = feed.entries
@@ -134,16 +143,18 @@ def get_entry(entry):
     if content:
         content = cleanup(content[0].get("value", ""))
     url = entry.id
+    pacific_now = datetime.now(pytz.timezone("Pacific/Auckland"))
+    offset = pacific_now.utcoffset().total_seconds()
     return {
         "url": url,
         "link": entry.get("link", ""),
         "links": entry.get("links", ""),
         "title": cleanup(entry.title),
         "author": cleanup(author),
-        "summary": cleanup(summary),
+        "summary": cleanup(summary)[: 150] + "…\n\n(more…)",
         "content": content,
         "hashtags": " ".join(hashtags),
-        "updated": dateutil.parser.parse(entry["updated"]),
+        "updated": dateutil.parser.parse(entry["updated"]) - timedelta(seconds=offset),
     }
 
 
@@ -238,4 +249,4 @@ def setup(config_file):
 
 
 if __name__ == "__main__":
-    main()
+    scrape(1, 2)
